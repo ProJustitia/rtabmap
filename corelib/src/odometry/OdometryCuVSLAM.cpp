@@ -1031,11 +1031,6 @@ bool prepareImages(const SensorData & data,
         right_cuvslam_image.camera_index = camera_index;
         right_cuvslam_image.pitch = right_image_slice.step;
         right_cuvslam_image.image_encoding = right_encoding;
-        // Mask fields (not used in this implementation)
-        right_cuvslam_image.input_mask = nullptr;
-        right_cuvslam_image.mask_width = 0;
-        right_cuvslam_image.mask_height = 0;
-        right_cuvslam_image.mask_pitch = 0;
 
         cuvslam_images.push_back(right_cuvslam_image);
         
@@ -1126,6 +1121,16 @@ cv::Mat convertCuVSLAMCovariance(const float * cuvslam_covariance, bool use_raw_
     }
     
     // Ensure diagonal elements are positive and finite (RTAB-Map requirement)
+    return cv_covariance;
+}
+
+#endif // RTABMAP_CUVSLAM
+
+} // namespace rtabmap
+
+ap
+
+  // Ensure diagonal elements are positive and finite (RTAB-Map requirement)
     return cv_covariance;
 }
 
