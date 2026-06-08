@@ -69,6 +69,11 @@ private:
 	bool tracking_;
 	bool planar_constraints_;
 	int multicam_mode_;
+	bool use_imu_;
+	double gyro_noise_;
+	double acc_noise_;
+	double gyro_walk_;
+	double acc_walk_;
 	Transform previous_pose_;
 	double last_timestamp_;
 

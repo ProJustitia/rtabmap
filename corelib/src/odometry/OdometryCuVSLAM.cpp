@@ -97,6 +97,11 @@ bool initializeCuVSLAM(const SensorData & data,
                        CUVSLAM_GroundConstraintHandle & ground_constraint_handle,
                        bool planar_constraints,
                        int multicam_mode,
+                       bool use_imu,
+                       double gyro_noise,
+                       double acc_noise,
+                       double gyro_walk,
+                       double acc_walk,
                        std::vector<uint8_t *> & gpu_left_image_data,
                        std::vector<uint8_t *> & gpu_right_image_data,
                        std::vector<size_t> & gpu_left_image_sizes,
@@ -105,7 +110,7 @@ bool initializeCuVSLAM(const SensorData & data,
 	                   std::vector<std::array<float, 12>> & intrinsics,
                        cudaStream_t & cuda_stream);
     
-CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_mode);
+CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_mode, bool use_imu, double gyro_noise, double acc_noise, double gyro_walk, double acc_walk);
 
 bool prepareImages(const SensorData & data, 
                     std::vector<CUVSLAM_Image> & cuvslam_images,
@@ -181,6 +186,11 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
     tracking_(false),
     planar_constraints_(false),
     multicam_mode_(0),
+    use_imu_(false),
+    gyro_noise_(0.01),
+    acc_noise_(0.1),
+    gyro_walk_(0.000001),
+    acc_walk_(0.0001),
     previous_pose_(Transform::getIdentity()),
     last_timestamp_(-1.0),
     observations_(5000),
@@ -195,8 +205,18 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
 #ifdef RTABMAP_CUVSLAM
     Parameters::parse(parameters, Parameters::kRegForce3DoF(), planar_constraints_);
 	Parameters::parse(parameters, Parameters::kOdomCuVSLAMMulticamMode(), multicam_mode_);
+	Parameters::parse(parameters, Parameters::kOdomCuVSLAMUseIMU(), use_imu_);
+	Parameters::parse(parameters, Parameters::kOdomCuVSLAMGyroNoise(), gyro_noise_);
+	Parameters::parse(parameters, Parameters::kOdomCuVSLAMAccNoise(), acc_noise_);
+	Parameters::parse(parameters, Parameters::kOdomCuVSLAMGyroWalk(), gyro_walk_);
+	Parameters::parse(parameters, Parameters::kOdomCuVSLAMAccWalk(), acc_walk_);
     UASSERT(multicam_mode_ >= 0 && multicam_mode_ <= 2);
 	UINFO("%s=%d", Parameters::kOdomCuVSLAMMulticamMode().c_str(), multicam_mode_);
+	UINFO("%s=%d", Parameters::kOdomCuVSLAMUseIMU().c_str(), use_imu_ ? 1:0);
+	UINFO("%s=%f", Parameters::kOdomCuVSLAMGyroNoise().c_str(), gyro_noise_);
+	UINFO("%s=%f", Parameters::kOdomCuVSLAMAccNoise().c_str(), acc_noise_);
+	UINFO("%s=%f", Parameters::kOdomCuVSLAMGyroWalk().c_str(), gyro_walk_);
+	UINFO("%s=%f", Parameters::kOdomCuVSLAMAccWalk().c_str(), acc_walk_);
     // Warm up GPU and create CUDA context before tracker initialization
     // Supposedly this will speed up the tracker initialization
     CUVSLAM_WarmUpGPU();
@@ -336,6 +356,11 @@ Transform OdometryCuVSLAM::computeTransform(
             ground_constraint_handle_,
             planar_constraints_,
             multicam_mode_,
+            use_imu_,
+            gyro_noise_,
+            acc_noise_,
+            gyro_walk_,
+            acc_walk_,
             gpu_left_image_data_,
             gpu_right_image_data_,
             gpu_left_image_sizes_,
@@ -648,6 +673,11 @@ bool initializeCuVSLAM(const SensorData & data,
                        CUVSLAM_GroundConstraintHandle & ground_constraint_handle,
                        bool planar_constraints,
                        int multicam_mode,
+                       bool use_imu,
+                       double gyro_noise,
+                       double acc_noise,
+                       double gyro_walk,
+                       double acc_walk,
                        std::vector<uint8_t *> & gpu_left_image_data,
                        std::vector<uint8_t *> & gpu_right_image_data,
                        std::vector<size_t> & gpu_left_image_sizes,
@@ -728,7 +758,7 @@ bool initializeCuVSLAM(const SensorData & data,
     camera_rig.cameras = cuvslam_cameras.data();
     camera_rig.num_cameras = cuvslam_cameras.size();
 
-    const CUVSLAM_Configuration configuration = CreateConfiguration(data, multicam_mode);
+    const CUVSLAM_Configuration configuration = CreateConfiguration(data, multicam_mode, use_imu, gyro_noise, acc_noise, gyro_walk, acc_walk);
 
     // Create tracker
     CUVSLAM_TrackerHandle tracker_handle;
@@ -775,7 +805,7 @@ Implementation based on Isaac ROS VisualSlamNode::VisualSlamImpl::CreateConfigur
 Source: isaac_ros_visual_slam/isaac_ros_visual_slam/src/impl/visual_slam_impl.cpp:379-422
 https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_visual_slam/blob/19be8c781a55dee9cfbe9f097adca3986638feb1/isaac_ros_visual_slam/src/impl/visual_slam_impl.cpp#L379-L422    
 */
-CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_mode)
+CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_mode, bool use_imu, double gyro_noise, double acc_noise, double gyro_walk, double acc_walk)
 {
     CUVSLAM_Configuration configuration;
     CUVSLAM_InitDefaultConfiguration(&configuration);
@@ -794,8 +824,12 @@ CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_
     configuration.enable_landmarks_export = 0;          // SLAM feature (optional)
     configuration.enable_reading_slam_internals = 0;    // SLAM feature (optional)
     
-    // Odometry configuration (Vision-only, no IMU)
-    configuration.odometry_mode = CUVSLAM_OdometryMode::Multicamera;
+    // Odometry configuration
+    if(use_imu) {
+        configuration.odometry_mode = CUVSLAM_OdometryMode::VisualInertial;
+    } else {
+        configuration.odometry_mode = CUVSLAM_OdometryMode::Multicamera;
+    }
     configuration.multicam_mode = multicam_mode;    // moderate (0), performance (1) or precision (2).
     configuration.debug_imu_mode = 0;
         
