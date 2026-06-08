@@ -687,6 +687,11 @@ class RTABMAP_CORE_EXPORT Parameters
 
     // Odometry cuVSLAM
     RTABMAP_PARAM(OdomCuVSLAM, MulticamMode,        int, 0,  "cuVSLAM multicam_mode setting: 0=moderate, 1=performance, 2=precision.");
+    RTABMAP_PARAM(OdomCuVSLAM, UseIMU,              bool, false, "Enable IMU (VIO mode) for cuVSLAM.");
+    RTABMAP_PARAM(OdomCuVSLAM, GyroNoise,           double, 0.01, "IMU gyroscope \"white noise\".");
+    RTABMAP_PARAM(OdomCuVSLAM, AccNoise,            double, 0.1,  "IMU accelerometer \"white noise\".");
+    RTABMAP_PARAM(OdomCuVSLAM, GyroWalk,            double, 0.000001, "IMU gyroscope \"random walk\".");
+    RTABMAP_PARAM(OdomCuVSLAM, AccWalk,             double, 0.0001,   "IMU accelerometer \"random walk\".");
 
     // Odometry LIO-SAM
     RTABMAP_PARAM_STR(OdomLIOSAM, ConfigPath,  "", "Path to LIO-SAM params.yaml config file. When set, sensor/IMU/feature parameters are loaded from the file and the individual parameters below are ignored.");
