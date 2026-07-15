@@ -50,6 +50,7 @@ public:
 
 	virtual void reset(const Transform & initialPose = Transform::getIdentity());
 	virtual Odometry::Type getType() {return Odometry::kTypeCuVSLAM;}
+	virtual bool canProcessRawImages() const { return true; }
 
 private:
 	virtual Transform computeTransform(SensorData & image, const Transform & guess = Transform(), OdometryInfo * info = 0);

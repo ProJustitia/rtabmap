@@ -823,7 +823,7 @@ bool allocateGpuMemory(size_t size, uint8_t ** gpu_ptr, size_t * current_size)
             cudaFree(*gpu_ptr);
         }
         *gpu_ptr = nullptr;
-        cudaError_t cuda_err = cudaMalloc(gpu_ptr, size);
+        cudaError_t cuda_err = cudaMallocManaged(gpu_ptr, size);
         if(cuda_err != cudaSuccess) {
             UERROR("Failed to allocate GPU memory: %s", cudaGetErrorString(cuda_err));
             return false;
@@ -833,7 +833,7 @@ bool allocateGpuMemory(size_t size, uint8_t ** gpu_ptr, size_t * current_size)
     return true;
 }
 
-bool copyToGpuAsync(const cv::Mat & cpu_image, uint8_t * gpu_ptr, size_t size, cudaStream_t & cuda_stream)
+bool copyToGpuAsync2D(const cv::Mat & cpu_image, uint8_t * gpu_ptr, size_t gpu_pitch, cudaStream_t & cuda_stream)
 {
     // Initialize CUDA stream if not already done
     if(cuda_stream == nullptr) {
@@ -845,8 +845,7 @@ bool copyToGpuAsync(const cv::Mat & cpu_image, uint8_t * gpu_ptr, size_t size, c
     }
     
     // Copy CPU data to GPU memory with async operation for better performance
-    cudaError_t cuda_err = cudaMemcpyAsync(gpu_ptr, cpu_image.data, size, 
-                                          cudaMemcpyHostToDevice, cuda_stream);
+    cudaError_t cuda_err = cudaMemcpy2DAsync(gpu_ptr, gpu_pitch, cpu_image.data, cpu_image.step, cpu_image.cols * cpu_image.elemSize(), cpu_image.rows, cudaMemcpyHostToDevice, cuda_stream);
     if(cuda_err != cudaSuccess) {
         UERROR("Failed to copy image to GPU: %s", cudaGetErrorString(cuda_err));
         return false;
@@ -942,19 +941,21 @@ bool prepareImages(const SensorData & data,
         int left_image_height = model.left().imageHeight();
         int right_image_height = model.right().imageHeight();
 
-        // makes a copy for the sliced images
-        cv::Mat left_image_slice = processed_left_image(cv::Rect(stereo_index * left_image_width, 0, left_image_width, left_image_height)).clone();
-        cv::Mat right_image_slice = processed_right_image(cv::Rect(stereo_index * right_image_width, 0, right_image_width, right_image_height)).clone();
+        // slice out the image for the current stereo pair, without cloning
+        cv::Mat left_image_slice = processed_left_image(cv::Rect(stereo_index * left_image_width, 0, left_image_width, left_image_height));
+        cv::Mat right_image_slice = processed_right_image(cv::Rect(stereo_index * right_image_width, 0, right_image_width, right_image_height));
         
-        size_t left_image_size = left_image_slice.total() * left_image_slice.elemSize();
-        size_t right_image_size = right_image_slice.total() * right_image_slice.elemSize();
+        size_t left_gpu_pitch = left_image_width * left_image_slice.elemSize();
+        size_t right_gpu_pitch = right_image_width * right_image_slice.elemSize();
+        size_t left_image_size = left_gpu_pitch * left_image_height;
+        size_t right_image_size = right_gpu_pitch * right_image_height;
 
         // Allocate GPU memory for left camera
         if(!allocateGpuMemory(left_image_size, &gpu_left_image_data[stereo_index], &gpu_left_image_sizes[stereo_index])) {
             UERROR("PREPARE IMAGES: Failed to allocate GPU memory for left image");
             return false;
         }
-        if(!copyToGpuAsync(left_image_slice, gpu_left_image_data[stereo_index], left_image_size, cuda_stream)) {
+        if(!copyToGpuAsync2D(left_image_slice, gpu_left_image_data[stereo_index], left_gpu_pitch, cuda_stream)) {
             UERROR("PREPARE IMAGES: Failed to copy left image to GPU");
             return false;
         }
@@ -966,7 +967,7 @@ bool prepareImages(const SensorData & data,
         left_cuvslam_image.pixels = gpu_left_image_data[stereo_index];  // GPU memory pointer
         left_cuvslam_image.timestamp_ns = timestamp_ns;
         left_cuvslam_image.camera_index = camera_index;
-        left_cuvslam_image.pitch = left_image_slice.step;
+        left_cuvslam_image.pitch = left_gpu_pitch;
         left_cuvslam_image.image_encoding = left_encoding;
         // Mask fields (not used in this implementation)
         left_cuvslam_image.input_mask = nullptr;
@@ -984,7 +985,7 @@ bool prepareImages(const SensorData & data,
             return false;
         }
         
-        if(!copyToGpuAsync(right_image_slice, gpu_right_image_data[stereo_index], right_image_size, cuda_stream)) {
+        if(!copyToGpuAsync2D(right_image_slice, gpu_right_image_data[stereo_index], right_gpu_pitch, cuda_stream)) {
             UERROR("PREPARE IMAGES: Failed to copy right image to GPU");
             return false;
         }
@@ -995,7 +996,7 @@ bool prepareImages(const SensorData & data,
         right_cuvslam_image.pixels = gpu_right_image_data[stereo_index];  // GPU memory pointer
         right_cuvslam_image.timestamp_ns = timestamp_ns;
         right_cuvslam_image.camera_index = camera_index;
-        right_cuvslam_image.pitch = right_image_slice.step;
+        right_cuvslam_image.pitch = right_gpu_pitch;
         right_cuvslam_image.image_encoding = right_encoding;
         // Mask fields (not used in this implementation)
         right_cuvslam_image.input_mask = nullptr;
