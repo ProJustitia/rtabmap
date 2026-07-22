@@ -364,10 +364,26 @@ Transform OdometryCuVSLAM::computeTransform(
         return Transform();
     }
     
-    // Not using the IMU yet
+    // Process IMU if available
     if(!data.imu().empty())
     {
-        UWARN("IMU data available but processing not implemented yet");
+        CUVSLAM_ImuMeasurement imu_measurement;
+        
+        cv::Point3f acc(data.imu().linearAcceleration()[0], data.imu().linearAcceleration()[1], data.imu().linearAcceleration()[2]);
+        cv::Point3f gyr(data.imu().angularVelocity()[0], data.imu().angularVelocity()[1], data.imu().angularVelocity()[2]);
+        
+        cv::Point3f cv_acc = util3d::transformPoint(acc, cuvslam_pose_canonical);
+        cv::Point3f cv_gyr = util3d::transformPoint(gyr, cuvslam_pose_canonical);
+        
+        imu_measurement.linear_accelerations[0] = cv_acc.x;
+        imu_measurement.linear_accelerations[1] = cv_acc.y;
+        imu_measurement.linear_accelerations[2] = cv_acc.z;
+        imu_measurement.angular_velocities[0] = cv_gyr.x;
+        imu_measurement.angular_velocities[1] = cv_gyr.y;
+        imu_measurement.angular_velocities[2] = cv_gyr.z;
+        
+        int64_t timestamp_ns = static_cast<int64_t>(data.stamp() * 1000000000.0);
+        CUVSLAM_RegisterImuMeasurement(cuvslam_handle_, timestamp_ns, &imu_measurement);
     }
     
     // Validate images and tracker status
@@ -794,9 +810,25 @@ CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_
     configuration.enable_landmarks_export = 0;          // SLAM feature (optional)
     configuration.enable_reading_slam_internals = 0;    // SLAM feature (optional)
     
-    // Odometry configuration (Vision-only, no IMU)
-    configuration.odometry_mode = CUVSLAM_OdometryMode::Multicamera;
-    configuration.multicam_mode = multicam_mode;    // moderate (0), performance (1) or precision (2).
+    // Odometry configuration (Vision-only or IMU)
+    if(!data.imu().empty()) {
+        configuration.odometry_mode = CUVSLAM_OdometryMode::Inertial;
+        
+        // Convert ROS base_link to ROS IMU frame
+        Transform base_pose_imu = data.imu().localTransform();
+        // Convert to cuVSLAM frames: cuVSLAM_base_link -> cuVSLAM_imu
+        Transform cv_base_link_pose_cv_imu = cuvslam_pose_canonical * base_pose_imu * canonical_pose_cuvslam;
+        
+        configuration.imu_calibration.rig_from_imu = TocuVSLAMPose(cv_base_link_pose_cv_imu);
+        configuration.imu_calibration.frequency = 200.0f; 
+        configuration.imu_calibration.gyroscope_noise_density = 0.000244f;
+        configuration.imu_calibration.gyroscope_random_walk = 0.000019393f;
+        configuration.imu_calibration.accelerometer_noise_density = 0.001862f;
+        configuration.imu_calibration.accelerometer_random_walk = 0.003f;
+    } else {
+        configuration.odometry_mode = CUVSLAM_OdometryMode::Multicamera;
+    }
+    configuration.multicam_mode = multicam_mode;    
     configuration.debug_imu_mode = 0;
         
     // SLAM parameters (disabled)
@@ -805,9 +837,6 @@ CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_
     configuration.slam_max_map_size = 0;
     configuration.slam_sync_mode = 0;
 
-    // Use for getting debug images and logs
-    // configuration.debug_dump_directory = "/home/...your desired directory...";
-    
     return configuration;
 }
 
