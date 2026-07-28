@@ -311,12 +311,38 @@ Transform OdometryCuVSLAM::computeTransform(
         return Transform();
     }
     
-    // Check if we have valid image data
+    // Process IMU if available — this runs on every call (both IMU-only and image+IMU calls)
+    // cuVSLAM expects multiple IMU samples between camera frames for proper inertial preintegration
+    if(!data.imu().empty() && cuvslam_handle_)
+    {
+        CUVSLAM_ImuMeasurement imu_measurement;
+        
+        cv::Point3f acc(data.imu().linearAcceleration()[0], data.imu().linearAcceleration()[1], data.imu().linearAcceleration()[2]);
+        cv::Point3f gyr(data.imu().angularVelocity()[0], data.imu().angularVelocity()[1], data.imu().angularVelocity()[2]);
+        
+        cv::Point3f cv_acc = util3d::transformPoint(acc, cuvslam_pose_canonical);
+        cv::Point3f cv_gyr = util3d::transformPoint(gyr, cuvslam_pose_canonical);
+        
+        imu_measurement.linear_accelerations[0] = cv_acc.x;
+        imu_measurement.linear_accelerations[1] = cv_acc.y;
+        imu_measurement.linear_accelerations[2] = cv_acc.z;
+        imu_measurement.angular_velocities[0] = cv_gyr.x;
+        imu_measurement.angular_velocities[1] = cv_gyr.y;
+        imu_measurement.angular_velocities[2] = cv_gyr.z;
+        
+        int64_t timestamp_ns = static_cast<int64_t>(data.stamp() * 1000000000.0);
+        CUVSLAM_RegisterImuMeasurement(cuvslam_handle_, timestamp_ns, &imu_measurement);
+    }
+    
+    // IMU-only call (no images) — return early after registering the measurement above
     if(data.imageRaw().empty() || data.rightRaw().empty())
     {
-        UERROR("cuVSLAM odometry only works with stereo cameras! It requires both left and right images! Left: %s, Right: %s", 
-               data.imageRaw().empty() ? "empty" : "ok", 
-               data.rightRaw().empty() ? "empty" : "ok");       
+        // Only warn if this is not an expected IMU-only async call
+        if(data.imu().empty()) {
+            UERROR("cuVSLAM odometry only works with stereo cameras! It requires both left and right images! Left: %s, Right: %s", 
+                   data.imageRaw().empty() ? "empty" : "ok", 
+                   data.rightRaw().empty() ? "empty" : "ok");
+        }
         return Transform();
     }
 
@@ -364,27 +390,6 @@ Transform OdometryCuVSLAM::computeTransform(
         return Transform();
     }
     
-    // Process IMU if available
-    if(!data.imu().empty())
-    {
-        CUVSLAM_ImuMeasurement imu_measurement;
-        
-        cv::Point3f acc(data.imu().linearAcceleration()[0], data.imu().linearAcceleration()[1], data.imu().linearAcceleration()[2]);
-        cv::Point3f gyr(data.imu().angularVelocity()[0], data.imu().angularVelocity()[1], data.imu().angularVelocity()[2]);
-        
-        cv::Point3f cv_acc = util3d::transformPoint(acc, cuvslam_pose_canonical);
-        cv::Point3f cv_gyr = util3d::transformPoint(gyr, cuvslam_pose_canonical);
-        
-        imu_measurement.linear_accelerations[0] = cv_acc.x;
-        imu_measurement.linear_accelerations[1] = cv_acc.y;
-        imu_measurement.linear_accelerations[2] = cv_acc.z;
-        imu_measurement.angular_velocities[0] = cv_gyr.x;
-        imu_measurement.angular_velocities[1] = cv_gyr.y;
-        imu_measurement.angular_velocities[2] = cv_gyr.z;
-        
-        int64_t timestamp_ns = static_cast<int64_t>(data.stamp() * 1000000000.0);
-        CUVSLAM_RegisterImuMeasurement(cuvslam_handle_, timestamp_ns, &imu_measurement);
-    }
     
     // Validate images and tracker status
     if(cuvslam_image_objects.empty()) {
