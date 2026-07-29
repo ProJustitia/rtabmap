@@ -33,6 +33,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <memory>
 #include <deque>
 #include <array>
+#include <cstdint>
+#include <utility>
 
 #ifdef RTABMAP_CUVSLAM
 #include <cuvslam.h>
@@ -51,6 +53,7 @@ public:
 	virtual void reset(const Transform & initialPose = Transform::getIdentity());
 	virtual Odometry::Type getType() {return Odometry::kTypeCuVSLAM;}
 	virtual bool canProcessRawImages() const { return true; }
+	virtual bool canProcessAsyncIMU() const {return true;}
 
 private:
 	virtual Transform computeTransform(SensorData & image, const Transform & guess = Transform(), OdometryInfo * info = 0);
@@ -72,6 +75,9 @@ private:
 	int multicam_mode_;
 	Transform previous_pose_;
 	double last_timestamp_;
+	int64_t last_imu_timestamp_ns_;
+	Transform imu_local_transform_;
+	std::deque<std::pair<int64_t, CUVSLAM_ImuMeasurement> > pending_imu_measurements_;
 
 	// Configuration Thresholds
 	double velocity_ratio_threshold_high_ = 1.5;			// The maximum velocity ratio of guess / estimated velocity needed to detect lost state.
