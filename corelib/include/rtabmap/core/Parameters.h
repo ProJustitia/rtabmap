@@ -687,7 +687,20 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(OdomOpen3D, Method,           int, 0,  "Registration method: 0=PointToPlane, 1=Intensity, 2=Hybrid.");
 
     // Odometry cuVSLAM
-    RTABMAP_PARAM(OdomCuVSLAM, MulticamMode,        int, 0,  "cuVSLAM multicam_mode setting: 0=moderate, 1=performance, 2=precision.");
+    RTABMAP_PARAM(OdomCuVSLAM, MulticamMode,             int,    0,           "cuVSLAM multicam_mode setting: 0=moderate, 1=performance, 2=precision.");
+    RTABMAP_PARAM(OdomCuVSLAM, UseIMU,                   bool,   false,       "Enable IMU integration in cuVSLAM (Inertial odometry mode). Requires IMU data to be published. When false, cuVSLAM runs in visual-only Multicamera mode.");
+    // IMU noise parameters for Bosch BMI055 (used in Intel RealSense D455 / D435i).
+    // Gyro noise density:  BMI055 datasheet noise density 0.014 deg/s/sqrt(Hz) = 0.000244 rad/s/sqrt(Hz)
+    // Gyro random walk:    estimated ~4e-6 rad/s^2/sqrt(Hz) from Allan variance measurements
+    // Accel noise density: BMI055 datasheet 150 ug/sqrt(Hz) ≈ 0.00147 m/s^2/sqrt(Hz)
+    // Accel random walk:   estimated ~4e-5 m/s^3/sqrt(Hz) from Allan variance measurements
+    // IMU frequency:       D455 gyroscope runs at 400 Hz
+    // These defaults are suitable for D455; override them if you have Allan variance calibration data.
+    RTABMAP_PARAM(OdomCuVSLAM, ImuGyroNoiseDensity,      double, 0.000244,    "IMU gyroscope noise density [rad/s/sqrt(Hz)]. Default: Bosch BMI055 (RealSense D455).");
+    RTABMAP_PARAM(OdomCuVSLAM, ImuGyroRandomWalk,        double, 0.000004,    "IMU gyroscope bias random walk [rad/s^2/sqrt(Hz)]. Default: Bosch BMI055 (RealSense D455).");
+    RTABMAP_PARAM(OdomCuVSLAM, ImuAccelNoiseDensity,     double, 0.00147,     "IMU accelerometer noise density [m/s^2/sqrt(Hz)]. Default: Bosch BMI055 (RealSense D455).");
+    RTABMAP_PARAM(OdomCuVSLAM, ImuAccelRandomWalk,       double, 0.00004,     "IMU accelerometer bias random walk [m/s^3/sqrt(Hz)]. Default: Bosch BMI055 (RealSense D455).");
+    RTABMAP_PARAM(OdomCuVSLAM, ImuFrequency,             double, 400.0,       "IMU measurement frequency [Hz]. RealSense D455 gyroscope runs at 400 Hz.");
 
     // Odometry LIO-SAM
     RTABMAP_PARAM_STR(OdomLIOSAM, ConfigPath,  "", "Path to LIO-SAM params.yaml config file. When set, sensor/IMU/feature parameters are loaded from the file and the individual parameters below are ignored.");

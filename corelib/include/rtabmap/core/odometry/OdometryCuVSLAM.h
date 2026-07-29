@@ -55,6 +55,21 @@ public:
 	virtual bool canProcessRawImages() const { return true; }
 	virtual bool canProcessAsyncIMU() const {return true;}
 
+#ifdef RTABMAP_CUVSLAM
+	// -----------------------------------------------------------------------
+	// IMU calibration parameters (populated from RTAB-Map params at construction)
+	// -----------------------------------------------------------------------
+	struct ImuParams
+	{
+		bool   use_imu;                   // Enable IMU/Inertial mode
+		double gyro_noise_density;        // rad/s/sqrt(Hz)
+		double gyro_random_walk;          // rad/s^2/sqrt(Hz)
+		double accel_noise_density;       // m/s^2/sqrt(Hz)
+		double accel_random_walk;         // m/s^3/sqrt(Hz)
+		double frequency;                 // Hz
+	};
+#endif
+
 private:
 	virtual Transform computeTransform(SensorData & image, const Transform & guess = Transform(), OdometryInfo * info = 0);
 	virtual void cleanupCuVSLAMResources();
@@ -66,7 +81,9 @@ private:
 
 	std::vector<CUVSLAM_Camera> cuvslam_cameras_;
 	std::vector<std::array<float, 12>> intrinsics_;
-	
+
+	ImuParams imu_params_;
+
 	// State tracking
 	bool initialized_;
 	bool lost_;
@@ -75,29 +92,33 @@ private:
 	int multicam_mode_;
 	Transform previous_pose_;
 	double last_timestamp_;
-	int64_t last_imu_timestamp_ns_;
+	// Tracks the last timestamp seen from any data (IMU-only or image+IMU).
+	// Used to reject non-increasing timestamps in the pending IMU queue.
+	int64_t last_received_timestamp_ns_;
 	Transform imu_local_transform_;
 	std::deque<std::pair<int64_t, CUVSLAM_ImuMeasurement> > pending_imu_measurements_;
 
-	// Configuration Thresholds
-	double velocity_ratio_threshold_high_ = 1.5;			// The maximum velocity ratio of guess / estimated velocity needed to detect lost state.
-	double velocity_ratio_threshold_low_ = 0.5;				// The minimum velocity ratio of guess / estimated velocity needed to detect lost state.
-	double velocity_difference_threshold_ = 0.1;			// The maximum velocity difference between the guess and the estimated velocity needed to detect lost state.
-	double zero_estimated_velocity_threshold_ = 0.00001;	// The minimum cuVSLAM estimated velocity needed to detect lost state.
-	double min_landmarks_threshold_ = 30; 					// The minimum number of landmarks needed to start tracking after an initialization.
-	
-	// Forward cuVLSAM covariance directly to RTAB-Map.
-	// When true this disables covariance based lost detection.
-	bool use_raw_covariance_  = false;
+	// -----------------------------------------------------------------------
+	// Configuration thresholds (parsed from parameters)
+	// -----------------------------------------------------------------------
+	double velocity_ratio_threshold_high_;    // Maximum guess/estimated velocity ratio to accept tracking
+	double velocity_ratio_threshold_low_;     // Minimum guess/estimated velocity ratio to accept tracking
+	double velocity_difference_threshold_;    // Maximum absolute velocity difference (m/s) to accept tracking
+	double zero_estimated_velocity_threshold_;// Estimated velocity below this is treated as zero
+	double min_landmarks_threshold_;          // Minimum tracked landmarks needed after init
 
-	//visualization
+	// Forward cuVSLAM covariance directly to RTAB-Map.
+	// When true, disables covariance-based lost detection.
+	bool use_raw_covariance_;
+
+	// Visualization buffers
 	std::vector<CUVSLAM_Observation> observations_;
 	std::vector<CUVSLAM_Landmark> landmarks_;
-	
+
 	// GPU memory management
-	std::vector<uint8_t *> gpu_left_image_data_; // pointers to all gpu images
+	std::vector<uint8_t *> gpu_left_image_data_;
 	std::vector<uint8_t *> gpu_right_image_data_;
-	std::vector<size_t> gpu_left_image_sizes_; // size of one image
+	std::vector<size_t> gpu_left_image_sizes_;
 	std::vector<size_t> gpu_right_image_sizes_;
 	cudaStream_t cuda_stream_;
 #endif

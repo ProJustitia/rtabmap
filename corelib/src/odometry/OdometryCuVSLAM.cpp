@@ -100,6 +100,7 @@ bool initializeCuVSLAM(const SensorData & data,
                        int multicam_mode,
                        bool use_imu_integration,
                        const Transform & imu_local_transform,
+                       const OdometryCuVSLAM::ImuParams & imu_params,
                        std::vector<uint8_t *> & gpu_left_image_data,
                        std::vector<uint8_t *> & gpu_right_image_data,
                        std::vector<size_t> & gpu_left_image_sizes,
@@ -112,7 +113,8 @@ CUVSLAM_Configuration CreateConfiguration(
     const SensorData & data,
     int multicam_mode,
     bool use_imu_integration,
-    const Transform & imu_local_transform);
+    const Transform & imu_local_transform,
+    const OdometryCuVSLAM::ImuParams & imu_params);
 
 bool prepareImages(const SensorData & data, 
                     std::vector<CUVSLAM_Image> & cuvslam_images,
@@ -200,6 +202,7 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
     ,
     cuvslam_handle_(nullptr),
     ground_constraint_handle_(nullptr),
+    imu_params_(),
     initialized_(false),
     lost_(false),
     tracking_(false),
@@ -207,11 +210,17 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
     multicam_mode_(0),
     previous_pose_(Transform::getIdentity()),
     last_timestamp_(-1.0),
-    last_imu_timestamp_ns_(-1),
+    last_received_timestamp_ns_(-1),
     imu_local_transform_(),
     pending_imu_measurements_(),
+    velocity_ratio_threshold_high_(1.5),
+    velocity_ratio_threshold_low_(0.5),
+    velocity_difference_threshold_(0.1),
+    zero_estimated_velocity_threshold_(0.00001),
+    min_landmarks_threshold_(30),
+    use_raw_covariance_(false),
     observations_(5000),
-	landmarks_(5000),
+    landmarks_(5000),
     gpu_left_image_data_(),
     gpu_right_image_data_(),
     gpu_left_image_sizes_(),
@@ -221,11 +230,35 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
 {
 #ifdef RTABMAP_CUVSLAM
     Parameters::parse(parameters, Parameters::kRegForce3DoF(), planar_constraints_);
-	Parameters::parse(parameters, Parameters::kOdomCuVSLAMMulticamMode(), multicam_mode_);
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMMulticamMode(), multicam_mode_);
     UASSERT(multicam_mode_ >= 0 && multicam_mode_ <= 2);
-	UINFO("%s=%d", Parameters::kOdomCuVSLAMMulticamMode().c_str(), multicam_mode_);
-    // Warm up GPU and create CUDA context before tracker initialization
-    // Supposedly this will speed up the tracker initialization
+    UINFO("%s=%d", Parameters::kOdomCuVSLAMMulticamMode().c_str(), multicam_mode_);
+
+    // Parse IMU parameters
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMUseIMU(),                imu_params_.use_imu);
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMImuGyroNoiseDensity(),   imu_params_.gyro_noise_density);
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMImuGyroRandomWalk(),     imu_params_.gyro_random_walk);
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMImuAccelNoiseDensity(),  imu_params_.accel_noise_density);
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMImuAccelRandomWalk(),    imu_params_.accel_random_walk);
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMImuFrequency(),          imu_params_.frequency);
+
+    if(imu_params_.use_imu)
+    {
+        UINFO("cuVSLAM IMU integration ENABLED");
+        UINFO("  Gyro noise density:  %.6f rad/s/sqrt(Hz)", imu_params_.gyro_noise_density);
+        UINFO("  Gyro random walk:    %.6f rad/s^2/sqrt(Hz)", imu_params_.gyro_random_walk);
+        UINFO("  Accel noise density: %.6f m/s^2/sqrt(Hz)", imu_params_.accel_noise_density);
+        UINFO("  Accel random walk:   %.6f m/s^3/sqrt(Hz)", imu_params_.accel_random_walk);
+        UINFO("  IMU frequency:       %.1f Hz", imu_params_.frequency);
+    }
+    else
+    {
+        UINFO("cuVSLAM IMU integration DISABLED (set %s=true to enable)",
+              Parameters::kOdomCuVSLAMUseIMU().c_str());
+    }
+
+    // Warm up GPU and create CUDA context before tracker initialization.
+    // Supposedly this speeds up the tracker initialization.
     CUVSLAM_WarmUpGPU();
 #endif
 }
@@ -311,7 +344,7 @@ void OdometryCuVSLAM::cleanupCuVSLAMResources()
     tracking_ = false;
     previous_pose_ = Transform::getIdentity();
     last_timestamp_ = -1.0;
-    last_imu_timestamp_ns_ = -1;
+    last_received_timestamp_ns_ = -1;
     imu_local_transform_.setNull();
     pending_imu_measurements_.clear();
 #endif
@@ -332,16 +365,16 @@ Transform OdometryCuVSLAM::computeTransform(
         {
             imu_local_transform_ = data.imu().localTransform();
         }
-        if(frame_timestamp_ns <= last_imu_timestamp_ns_)
+        if(frame_timestamp_ns <= last_received_timestamp_ns_)
         {
             UDEBUG("Skipping IMU sample with non-increasing timestamp (%lld <= %lld)",
                 static_cast<long long>(frame_timestamp_ns),
-                static_cast<long long>(last_imu_timestamp_ns_));
+                static_cast<long long>(last_received_timestamp_ns_));
         }
         else
         {
             pending_imu_measurements_.push_back(std::make_pair(frame_timestamp_ns, toCuVSLAMImuMeasurement(data.imu())));
-            last_imu_timestamp_ns_ = frame_timestamp_ns;
+            last_received_timestamp_ns_ = frame_timestamp_ns;
             if(pending_imu_measurements_.size() > 5000)
             {
                 pending_imu_measurements_.pop_front();
@@ -393,20 +426,43 @@ Transform OdometryCuVSLAM::computeTransform(
     // Initialize cuVSLAM tracker on first frame
     if(!initialized_)
     {   
+        // Determine whether IMU integration should be active.
+        // use_imu comes from the parameter, not from whether we have buffered samples.
+        // If IMU was requested but we have not received an extrinsic transform yet, abort
+        // rather than silently using a wrong (identity/null) calibration.
+        bool use_imu_integration = imu_params_.use_imu;
+        if(use_imu_integration && imu_local_transform_.isNull())
+        {
+            UERROR("OdomCuVSLAM/%s=true but no IMU local transform has been received yet. "
+                   "Ensure the IMU topic is publishing before the first camera frame, "
+                   "or disable IMU integration. Cannot initialize.",
+                   Parameters::kOdomCuVSLAMUseIMU().c_str());
+            return Transform();
+        }
+        if(use_imu_integration && pending_imu_measurements_.empty())
+        {
+            UWARN("OdomCuVSLAM/%s=true but no IMU measurements have been buffered before "
+                  "the first camera frame. IMU integration will be active but cuVSLAM may "
+                  "not have enough inertial data to initialize well. Consider delaying the "
+                  "first camera frame or increasing the IMU publish rate.",
+                  Parameters::kOdomCuVSLAMUseIMU().c_str());
+        }
+
         if(!initializeCuVSLAM(
-            data, 
+            data,
             cuvslam_handle_,
             ground_constraint_handle_,
             planar_constraints_,
             multicam_mode_,
-            !pending_imu_measurements_.empty(),
+            use_imu_integration,
             imu_local_transform_,
+            imu_params_,
             gpu_left_image_data_,
             gpu_right_image_data_,
             gpu_left_image_sizes_,
             gpu_right_image_sizes_,
             cuvslam_cameras_,
-	        intrinsics_,
+            intrinsics_,
             cuda_stream_))
         {
             UERROR("Failed to initialize cuVSLAM tracker");
@@ -733,6 +789,7 @@ bool initializeCuVSLAM(const SensorData & data,
                        int multicam_mode,
                        bool use_imu_integration,
                        const Transform & imu_local_transform,
+                       const OdometryCuVSLAM::ImuParams & imu_params,
                        std::vector<uint8_t *> & gpu_left_image_data,
                        std::vector<uint8_t *> & gpu_right_image_data,
                        std::vector<size_t> & gpu_left_image_sizes,
@@ -813,7 +870,7 @@ bool initializeCuVSLAM(const SensorData & data,
     camera_rig.cameras = cuvslam_cameras.data();
     camera_rig.num_cameras = cuvslam_cameras.size();
 
-    const CUVSLAM_Configuration configuration = CreateConfiguration(data, multicam_mode, use_imu_integration, imu_local_transform);
+    const CUVSLAM_Configuration configuration = CreateConfiguration(data, multicam_mode, use_imu_integration, imu_local_transform, imu_params);
 
     // Create tracker
     CUVSLAM_TrackerHandle tracker_handle;
@@ -864,7 +921,8 @@ CUVSLAM_Configuration CreateConfiguration(
     const SensorData & data,
     int multicam_mode,
     bool use_imu_integration,
-    const Transform & imu_local_transform)
+    const Transform & imu_local_transform,
+    const OdometryCuVSLAM::ImuParams & imu_params)
 {
     CUVSLAM_Configuration configuration;
     CUVSLAM_InitDefaultConfiguration(&configuration);
@@ -903,10 +961,31 @@ CUVSLAM_Configuration CreateConfiguration(
 #else
         configuration.imu_calibration.left_from_imu = TocuVSLAMPose(imu_pose);
 #endif
+        // Apply noise model parameters so cuVSLAM can tune its IMU integration filter.
+        // These correspond to the standard IMU noise model (Kalibr convention):
+        //   noise_density  = white noise PSD [rad/s/sqrt(Hz) or m/s^2/sqrt(Hz)]
+        //   random_walk    = bias instability / bias random walk [rad/s^2/sqrt(Hz) or m/s^3/sqrt(Hz)]
+        //   frequency      = IMU sample rate [Hz]
+        configuration.imu_calibration.gyroscope_noise_density     = static_cast<float>(imu_params.gyro_noise_density);
+        configuration.imu_calibration.gyroscope_random_walk       = static_cast<float>(imu_params.gyro_random_walk);
+        configuration.imu_calibration.accelerometer_noise_density = static_cast<float>(imu_params.accel_noise_density);
+        configuration.imu_calibration.accelerometer_random_walk   = static_cast<float>(imu_params.accel_random_walk);
+        configuration.imu_calibration.frequency                   = static_cast<float>(imu_params.frequency);
+
+        UINFO("cuVSLAM IMU calibration applied:");
+        UINFO("  rig_from_imu transform set");
+        UINFO("  gyro_noise_density=%.6f  gyro_random_walk=%.6f",
+              imu_params.gyro_noise_density, imu_params.gyro_random_walk);
+        UINFO("  accel_noise_density=%.6f  accel_random_walk=%.6f",
+              imu_params.accel_noise_density, imu_params.accel_random_walk);
+        UINFO("  frequency=%.1f Hz", imu_params.frequency);
     }
     else if(use_imu_integration)
     {
-        UWARN("IMU integration requested but IMU local transform is not available, using default cuVSLAM IMU calibration.");
+        // This path should not be reachable: we guard for this in computeTransform before calling
+        // initializeCuVSLAM. Log a hard error so it is visible if the guard is bypassed somehow.
+        UERROR("IMU integration requested but imu_local_transform is null at configuration time. "
+               "IMU noise parameters were NOT applied. This is a bug — please report it.");
     }
         
     // SLAM parameters (disabled)
