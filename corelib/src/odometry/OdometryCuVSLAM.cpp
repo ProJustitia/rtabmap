@@ -31,6 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/utilite/ULogger.h"
 #include "rtabmap/utilite/UTimer.h"
 #include <cmath>
+#include <cstdint>
 
 #ifdef RTABMAP_CUVSLAM
 #include "rtabmap/core/CameraModel.h"
@@ -97,6 +98,8 @@ bool initializeCuVSLAM(const SensorData & data,
                        CUVSLAM_GroundConstraintHandle & ground_constraint_handle,
                        bool planar_constraints,
                        int multicam_mode,
+                       bool use_imu_integration,
+                       const Transform & imu_local_transform,
                        std::vector<uint8_t *> & gpu_left_image_data,
                        std::vector<uint8_t *> & gpu_right_image_data,
                        std::vector<size_t> & gpu_left_image_sizes,
@@ -105,7 +108,11 @@ bool initializeCuVSLAM(const SensorData & data,
 	                   std::vector<std::array<float, 12>> & intrinsics,
                        cudaStream_t & cuda_stream);
     
-CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_mode);
+CUVSLAM_Configuration CreateConfiguration(
+    const SensorData & data,
+    int multicam_mode,
+    bool use_imu_integration,
+    const Transform & imu_local_transform);
 
 bool prepareImages(const SensorData & data, 
                     std::vector<CUVSLAM_Image> & cuvslam_images,
@@ -160,6 +167,23 @@ Transform FromcuVSLAMPose(const CUVSLAM_Pose & cuvslam_pose)
   return rtabmap_transform;
 }
 
+int64_t toCuVSLAMTimestampNs(double stamp)
+{
+	return static_cast<int64_t>(stamp * 1000000000.0);
+}
+
+CUVSLAM_ImuMeasurement toCuVSLAMImuMeasurement(const IMU & imu)
+{
+	CUVSLAM_ImuMeasurement measurement;
+	measurement.linear_accelerations[0] = static_cast<float>(imu.linearAcceleration()[0]);
+	measurement.linear_accelerations[1] = static_cast<float>(imu.linearAcceleration()[1]);
+	measurement.linear_accelerations[2] = static_cast<float>(imu.linearAcceleration()[2]);
+	measurement.angular_velocities[0] = static_cast<float>(imu.angularVelocity()[0]);
+	measurement.angular_velocities[1] = static_cast<float>(imu.angularVelocity()[1]);
+	measurement.angular_velocities[2] = static_cast<float>(imu.angularVelocity()[2]);
+	return measurement;
+}
+
 } // namespace rtabmap
 
 #endif
@@ -183,6 +207,9 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
     multicam_mode_(0),
     previous_pose_(Transform::getIdentity()),
     last_timestamp_(-1.0),
+    last_imu_timestamp_ns_(-1),
+    imu_local_transform_(),
+    pending_imu_measurements_(),
     observations_(5000),
 	landmarks_(5000),
     gpu_left_image_data_(),
@@ -284,6 +311,9 @@ void OdometryCuVSLAM::cleanupCuVSLAMResources()
     tracking_ = false;
     previous_pose_ = Transform::getIdentity();
     last_timestamp_ = -1.0;
+    last_imu_timestamp_ns_ = -1;
+    imu_local_transform_.setNull();
+    pending_imu_measurements_.clear();
 #endif
 }
 
@@ -294,6 +324,39 @@ Transform OdometryCuVSLAM::computeTransform(
 {    
 #ifdef RTABMAP_CUVSLAM
     UTimer timer;
+    const int64_t frame_timestamp_ns = toCuVSLAMTimestampNs(data.stamp());
+
+    if(!data.imu().empty())
+    {
+        if(!data.imu().localTransform().isNull())
+        {
+            imu_local_transform_ = data.imu().localTransform();
+        }
+        if(frame_timestamp_ns <= last_imu_timestamp_ns_)
+        {
+            UDEBUG("Skipping IMU sample with non-increasing timestamp (%lld <= %lld)",
+                static_cast<long long>(frame_timestamp_ns),
+                static_cast<long long>(last_imu_timestamp_ns_));
+        }
+        else
+        {
+            pending_imu_measurements_.push_back(std::make_pair(frame_timestamp_ns, toCuVSLAMImuMeasurement(data.imu())));
+            last_imu_timestamp_ns_ = frame_timestamp_ns;
+            if(pending_imu_measurements_.size() > 5000)
+            {
+                pending_imu_measurements_.pop_front();
+            }
+        }
+    }
+
+    if(data.imageRaw().empty() && data.rightRaw().empty() && !data.imu().empty())
+    {
+        if(info)
+        {
+            info->timeEstimation = timer.ticks();
+        }
+        return Transform();
+    }
 
     UDEBUG("=== computeTransform ENTRY === lost_=%s, tracking_=%s, initialized_=%s",
           lost_ ? "true" : "false",
@@ -336,6 +399,8 @@ Transform OdometryCuVSLAM::computeTransform(
             ground_constraint_handle_,
             planar_constraints_,
             multicam_mode_,
+            !pending_imu_measurements_.empty(),
+            imu_local_transform_,
             gpu_left_image_data_,
             gpu_right_image_data_,
             gpu_left_image_sizes_,
@@ -347,6 +412,7 @@ Transform OdometryCuVSLAM::computeTransform(
             UERROR("Failed to initialize cuVSLAM tracker");
             return Transform();
         }
+
     }
         
     // Prepare images for cuVSLAM
@@ -373,6 +439,28 @@ Transform OdometryCuVSLAM::computeTransform(
     if(!cuvslam_handle_) {
         UERROR("cuVSLAM tracker is null! initialized_: %s", initialized_ ? "true" : "false");
         return Transform();
+    }
+    if(!pending_imu_measurements_.empty())
+    {
+        std::deque<std::pair<int64_t, CUVSLAM_ImuMeasurement> >::iterator iter = pending_imu_measurements_.begin();
+        while(iter != pending_imu_measurements_.end())
+        {
+            if(iter->first > frame_timestamp_ns)
+            {
+                break;
+            }
+
+            CUVSLAM_Status imu_status = CUVSLAM_RegisterImuMeasurement(cuvslam_handle_, iter->first, &iter->second);
+            if(imu_status != CUVSLAM_SUCCESS)
+            {
+                UWARN("Failed to register IMU measurement in cuVSLAM (%d) at timestamp %lld",
+                    imu_status,
+                    static_cast<long long>(iter->first));
+                break;
+            }
+
+            iter = pending_imu_measurements_.erase(iter);
+        }
     }
 
     // Process wheel odom pose if available
@@ -643,6 +731,8 @@ bool initializeCuVSLAM(const SensorData & data,
                        CUVSLAM_GroundConstraintHandle & ground_constraint_handle,
                        bool planar_constraints,
                        int multicam_mode,
+                       bool use_imu_integration,
+                       const Transform & imu_local_transform,
                        std::vector<uint8_t *> & gpu_left_image_data,
                        std::vector<uint8_t *> & gpu_right_image_data,
                        std::vector<size_t> & gpu_left_image_sizes,
@@ -723,7 +813,7 @@ bool initializeCuVSLAM(const SensorData & data,
     camera_rig.cameras = cuvslam_cameras.data();
     camera_rig.num_cameras = cuvslam_cameras.size();
 
-    const CUVSLAM_Configuration configuration = CreateConfiguration(data, multicam_mode);
+    const CUVSLAM_Configuration configuration = CreateConfiguration(data, multicam_mode, use_imu_integration, imu_local_transform);
 
     // Create tracker
     CUVSLAM_TrackerHandle tracker_handle;
@@ -770,7 +860,11 @@ Implementation based on Isaac ROS VisualSlamNode::VisualSlamImpl::CreateConfigur
 Source: isaac_ros_visual_slam/isaac_ros_visual_slam/src/impl/visual_slam_impl.cpp:379-422
 https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_visual_slam/blob/19be8c781a55dee9cfbe9f097adca3986638feb1/isaac_ros_visual_slam/src/impl/visual_slam_impl.cpp#L379-L422    
 */
-CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_mode)
+CUVSLAM_Configuration CreateConfiguration(
+    const SensorData & data,
+    int multicam_mode,
+    bool use_imu_integration,
+    const Transform & imu_local_transform)
 {
     CUVSLAM_Configuration configuration;
     CUVSLAM_InitDefaultConfiguration(&configuration);
@@ -790,9 +884,30 @@ CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_
     configuration.enable_reading_slam_internals = 0;    // SLAM feature (optional)
     
     // Odometry configuration
-    configuration.odometry_mode = CUVSLAM_OdometryMode::Multicamera;
+    configuration.odometry_mode =
+#if defined(CUVSLAM_API_VERSION_MAJOR) && CUVSLAM_API_VERSION_MAJOR >= 14
+        use_imu_integration ? CUVSLAM_OdometryMode::Inertial :
+#endif
+        CUVSLAM_OdometryMode::Multicamera;
     configuration.multicam_mode = multicam_mode;    
-    configuration.debug_imu_mode = 0;
+    configuration.debug_imu_mode = use_imu_integration ? 1 : 0;
+#if defined(CUVSLAM_API_VERSION_MAJOR) && CUVSLAM_API_VERSION_MAJOR < 14
+    configuration.enable_imu_fusion = use_imu_integration ? 1 : 0;
+#endif
+
+    if(use_imu_integration && !imu_local_transform.isNull())
+    {
+        Transform imu_pose = cuvslam_pose_canonical * imu_local_transform.inverse() * canonical_pose_cuvslam;
+#if defined(CUVSLAM_API_VERSION_MAJOR) && CUVSLAM_API_VERSION_MAJOR >= 14
+        configuration.imu_calibration.rig_from_imu = TocuVSLAMPose(imu_pose);
+#else
+        configuration.imu_calibration.left_from_imu = TocuVSLAMPose(imu_pose);
+#endif
+    }
+    else if(use_imu_integration)
+    {
+        UWARN("IMU integration requested but IMU local transform is not available, using default cuVSLAM IMU calibration.");
+    }
         
     // SLAM parameters (disabled)
     configuration.planar_constraints = 0;
@@ -1091,4 +1206,3 @@ cv::Mat convertCuVSLAMCovariance(const float * cuvslam_covariance, bool use_raw_
 #endif // RTABMAP_CUVSLAM
 
 } // namespace rtabmap
-
