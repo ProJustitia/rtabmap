@@ -38,8 +38,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "rtabmap/core/SensorData.h"
 #include "rtabmap/core/Transform.h"
 #include "rtabmap/core/util3d_transforms.h"
+#if __has_include(<cuvslam.h>)
 #include <cuvslam.h>
 #include <ground_constraint.h>
+#elif __has_include(<cuvslam/cuvslam.h>)
+#include <cuvslam/cuvslam.h>
+#include <cuvslam/ground_constraint.h>
+#else
+#error "cuVSLAM headers not found"
+#endif
 #include <opencv2/opencv.hpp>
 #include <eigen3/Eigen/Dense>
 #include <cuda_runtime.h>
@@ -96,23 +103,38 @@ bool initializeCuVSLAM(const SensorData & data,
                        CUVSLAM_TrackerHandle & cuvslam_handle,
                        CUVSLAM_GroundConstraintHandle & ground_constraint_handle,
                        bool planar_constraints,
+                       bool rgbd_mode,
                        int multicam_mode,
+                       float rgbd_depth_scale_factor,
+                       int rgbd_enable_depth_stereo_tracking,
                        std::vector<uint8_t *> & gpu_left_image_data,
                        std::vector<uint8_t *> & gpu_right_image_data,
                        std::vector<size_t> & gpu_left_image_sizes,
                        std::vector<size_t> & gpu_right_image_sizes,
+                       std::vector<uint16_t *> & gpu_depth_image_data,
+                       std::vector<size_t> & gpu_depth_image_sizes,
                        std::vector<CUVSLAM_Camera> & cuvslam_cameras,
 	                   std::vector<std::array<float, 12>> & intrinsics,
                        cudaStream_t & cuda_stream);
     
-CUVSLAM_Configuration CreateConfiguration(const SensorData & data, int multicam_mode);
+CUVSLAM_Configuration CreateConfiguration(
+    const SensorData & data,
+    bool rgbd_mode,
+    int multicam_mode,
+    float rgbd_depth_scale_factor,
+    int rgbd_enable_depth_stereo_tracking);
 
 bool prepareImages(const SensorData & data, 
+                    bool rgbd_mode,
                     std::vector<CUVSLAM_Image> & cuvslam_images,
+                    CUVSLAM_DepthImage * cuvslam_depth_image,
+                    bool & has_depth_image,
                     std::vector<uint8_t *> & gpu_left_image_data,
                     std::vector<uint8_t *> & gpu_right_image_data,
+                    std::vector<uint16_t *> & gpu_depth_image_data,
                     std::vector<size_t> & gpu_left_image_sizes,
                     std::vector<size_t> & gpu_right_image_sizes,
+                    std::vector<size_t> & gpu_depth_image_sizes,
                     cudaStream_t & cuda_stream);
 
 cv::Mat convertCuVSLAMCovariance(const float * cuvslam_covariance, bool use_raw_covariance);
@@ -180,7 +202,10 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
     lost_(false),
     tracking_(false),
     planar_constraints_(false),
+    rgbd_mode_(false),
     multicam_mode_(0),
+    rgbd_depth_scale_factor_(0.001f),
+    rgbd_enable_depth_stereo_tracking_(0),
     previous_pose_(Transform::getIdentity()),
     last_timestamp_(-1.0),
     observations_(5000),
@@ -189,14 +214,23 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
     gpu_right_image_data_(),
     gpu_left_image_sizes_(),
     gpu_right_image_sizes_(),
+    gpu_depth_image_data_(),
+    gpu_depth_image_sizes_(),
     cuda_stream_(nullptr)
 #endif
 {
 #ifdef RTABMAP_CUVSLAM
     Parameters::parse(parameters, Parameters::kRegForce3DoF(), planar_constraints_);
 	Parameters::parse(parameters, Parameters::kOdomCuVSLAMMulticamMode(), multicam_mode_);
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMRGBDDepthScaleFactor(), rgbd_depth_scale_factor_);
+    bool rgbdDepthStereoTracking = Parameters::defaultOdomCuVSLAMRGBDEnableDepthStereoTracking();
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMRGBDEnableDepthStereoTracking(), rgbdDepthStereoTracking);
+    rgbd_enable_depth_stereo_tracking_ = rgbdDepthStereoTracking ? 1 : 0;
     UASSERT(multicam_mode_ >= 0 && multicam_mode_ <= 2);
+    UASSERT(rgbd_depth_scale_factor_ > 0.0f);
 	UINFO("%s=%d", Parameters::kOdomCuVSLAMMulticamMode().c_str(), multicam_mode_);
+    UINFO("%s=%f", Parameters::kOdomCuVSLAMRGBDDepthScaleFactor().c_str(), rgbd_depth_scale_factor_);
+    UINFO("%s=%s", Parameters::kOdomCuVSLAMRGBDEnableDepthStereoTracking().c_str(), rgbdDepthStereoTracking ? "true" : "false");
     // Warm up GPU and create CUDA context before tracker initialization
     // Supposedly this will speed up the tracker initialization
     CUVSLAM_WarmUpGPU();
@@ -1133,4 +1167,3 @@ cv::Mat convertCuVSLAMCovariance(const float * cuvslam_covariance, bool use_raw_
 #endif // RTABMAP_CUVSLAM
 
 } // namespace rtabmap
-

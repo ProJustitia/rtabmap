@@ -688,6 +688,8 @@ class RTABMAP_CORE_EXPORT Parameters
 
     // Odometry cuVSLAM
     RTABMAP_PARAM(OdomCuVSLAM, MulticamMode,        int, 0,  "cuVSLAM multicam_mode setting: 0=moderate, 1=performance, 2=precision.");
+    RTABMAP_PARAM(OdomCuVSLAM, RGBDDepthScaleFactor, float, 0.001, "cuVSLAM RGB-D depth scale factor (depth unit to meters).");
+    RTABMAP_PARAM(OdomCuVSLAM, RGBDEnableDepthStereoTracking, bool, false, "cuVSLAM RGB-D option to enable stereo 2D tracking between depth-aligned camera and other cameras.");
 
     // Odometry LIO-SAM
     RTABMAP_PARAM_STR(OdomLIOSAM, ConfigPath,  "", "Path to LIO-SAM params.yaml config file. When set, sensor/IMU/feature parameters are loaded from the file and the individual parameters below are ignored.");

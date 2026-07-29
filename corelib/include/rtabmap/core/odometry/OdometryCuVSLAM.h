@@ -35,8 +35,15 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <array>
 
 #ifdef RTABMAP_CUVSLAM
+#if __has_include(<cuvslam.h>)
 #include <cuvslam.h>
 #include <ground_constraint.h>
+#elif __has_include(<cuvslam/cuvslam.h>)
+#include <cuvslam/cuvslam.h>
+#include <cuvslam/ground_constraint.h>
+#else
+#error "cuVSLAM headers not found"
+#endif
 #include <cuda_runtime.h>
 #endif
 
@@ -70,7 +77,10 @@ private:
 	bool lost_;
 	bool tracking_;
 	bool planar_constraints_;
+	bool rgbd_mode_;
 	int multicam_mode_;
+	float rgbd_depth_scale_factor_;
+	int rgbd_enable_depth_stereo_tracking_;
 	Transform previous_pose_;
 	double last_timestamp_;
 
@@ -94,6 +104,8 @@ private:
 	std::vector<uint8_t *> gpu_right_image_data_;
 	std::vector<size_t> gpu_left_image_sizes_; // size of one image
 	std::vector<size_t> gpu_right_image_sizes_;
+	std::vector<uint16_t *> gpu_depth_image_data_;
+	std::vector<size_t> gpu_depth_image_sizes_;
 	cudaStream_t cuda_stream_;
 #endif
 };
