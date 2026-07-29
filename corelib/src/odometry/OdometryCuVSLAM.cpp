@@ -509,10 +509,29 @@ Transform OdometryCuVSLAM::computeTransform(
             CUVSLAM_Status imu_status = CUVSLAM_RegisterImuMeasurement(cuvslam_handle_, iter->first, &iter->second);
             if(imu_status != CUVSLAM_SUCCESS)
             {
-                UWARN("Failed to register IMU measurement in cuVSLAM (%d) at timestamp %lld",
-                    imu_status,
-                    static_cast<long long>(iter->first));
-                break;
+                if(imu_status == CUVSLAM_INVALID_ARG)
+                {
+                    // Timestamp already registered or outside cuVSLAM's acceptance window.
+                    // This can happen when:
+                    //   1. The IMU sample timestamp (converted from double) has floating-point
+                    //      rounding that makes it appear slightly in the future or duplicate.
+                    //   2. IMU data arrives bundled with a camera frame, giving multiple IMU
+                    //      samples the same camera timestamp instead of their own hardware ts.
+                    // In both cases the sample is unrecoverable — discard it and move on.
+                    UDEBUG("Discarding stale/duplicate IMU measurement at timestamp %lld (CUVSLAM_INVALID_ARG)",
+                        static_cast<long long>(iter->first));
+                    iter = pending_imu_measurements_.erase(iter);
+                    continue;
+                }
+                else
+                {
+                    // Any other failure (e.g. tracker not ready) is non-recoverable for this
+                    // batch — stop registering but leave remaining items for the next frame.
+                    UWARN("Failed to register IMU measurement in cuVSLAM (%d) at timestamp %lld",
+                        imu_status,
+                        static_cast<long long>(iter->first));
+                    break;
+                }
             }
 
             iter = pending_imu_measurements_.erase(iter);
