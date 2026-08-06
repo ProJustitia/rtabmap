@@ -85,6 +85,11 @@ endif()
 if(POLICY CMP0072)
     cmake_policy(SET CMP0072 NEW)
 endif()
+# Timestamp the files extracted from a FetchContent URL download at extraction
+# time, so a changed URL actually triggers a rebuild of what depends on them.
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 
 IF(MINGW)
     # Hide the --enable-auto-import warning
