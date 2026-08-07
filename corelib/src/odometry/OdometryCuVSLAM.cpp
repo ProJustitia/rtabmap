@@ -242,6 +242,9 @@ OdometryCuVSLAM::OdometryCuVSLAM(const ParametersMap & parameters) :
     Parameters::parse(parameters, Parameters::kOdomCuVSLAMImuAccelRandomWalk(),    imu_params_.accel_random_walk);
     Parameters::parse(parameters, Parameters::kOdomCuVSLAMImuFrequency(),          imu_params_.frequency);
 
+    // Parse covariance mode
+    Parameters::parse(parameters, Parameters::kOdomCuVSLAMUseRawCovariance(), use_raw_covariance_);
+
     if(imu_params_.use_imu)
     {
         UINFO("cuVSLAM IMU integration ENABLED");
@@ -617,19 +620,19 @@ Transform OdometryCuVSLAM::computeTransform(
         if(diag_val > 0.1) {
             valid_covariance = false;
 
-            // If we don't have a guess, we can't use velocity difference to detect lost state.
-            // Thus at this point, we are lost. Warn the user that cuVSLAM probably needs a guess to work well.
+            // Without a guess we cannot compare velocities to confirm tracking loss,
+            // so we do NOT hard-set lost_ here. Instead we let the high covariance
+            // propagate to the upstream consumer (RTAB-Map loop-closure detector) which
+            // can decide to reject the transform based on the covariance value.
+            // A single high-covariance frame does not mean we are lost; it may be a
+            // momentarily difficult scene (blur, featureless region, etc.).
             if(guess.isNull()) {
-                UWARN("No guess provided, but covariance is invalid: %.8f", diag_val);
-                UWARN("We cannot use velocity difference to detect lost state without a guess!");
-                UWARN("Without a guess cuVSLAM is prone to getting lost easily!");
-                UWARN("It is highly recommended to provide a guess to cuVSLAM!");
-                lost_ = true;
-                if(info) {
-                    info->reg.covariance = cv::Mat::eye(6, 6, CV_64FC1) * 9999.0;
-                    info->timeEstimation = timer.ticks();
-                }
-                return Transform();
+                UWARN("High covariance (diag=%.6f) without an external pose guess. "
+                      "Velocity-based lost detection is unavailable. "
+                      "Propagating high covariance upstream. "
+                      "Consider providing a wheel-odometry or IMU guess for more robust tracking.",
+                      diag_val);
+                // Fall through — transform is still returned with inflated covariance.
             }
         }
     }
@@ -957,7 +960,7 @@ CUVSLAM_Configuration CreateConfiguration(
     
     // SLAM Enabled (required for observation buffer allocation) 
     configuration.enable_localization_n_mapping = 0;    // NO SLAM
-    configuration.enable_landmarks_export = 0;          // SLAM feature (optional)
+    configuration.enable_landmarks_export = 1;          // Required for CUVSLAM_GetLastLandmarks() to return VO landmarks
     configuration.enable_reading_slam_internals = 0;    // SLAM feature (optional)
     
     // Odometry configuration
@@ -1028,7 +1031,7 @@ bool allocateGpuMemory(size_t size, uint8_t ** gpu_ptr, size_t * current_size)
             cudaFree(*gpu_ptr);
         }
         *gpu_ptr = nullptr;
-        cudaError_t cuda_err = cudaMallocManaged(gpu_ptr, size);
+        cudaError_t cuda_err = cudaMalloc(reinterpret_cast<void**>(gpu_ptr), size);
         if(cuda_err != cudaSuccess) {
             UERROR("Failed to allocate GPU memory: %s", cudaGetErrorString(cuda_err));
             return false;

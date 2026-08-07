@@ -105,10 +105,10 @@ private:
 	double velocity_ratio_threshold_low_;     // Minimum guess/estimated velocity ratio to accept tracking
 	double velocity_difference_threshold_;    // Maximum absolute velocity difference (m/s) to accept tracking
 	double zero_estimated_velocity_threshold_;// Estimated velocity below this is treated as zero
-	double min_landmarks_threshold_;          // Minimum tracked landmarks needed after init
+	int min_landmarks_threshold_;             // Minimum tracked landmarks needed after init
 
 	// Forward cuVSLAM covariance directly to RTAB-Map.
-	// When true, disables covariance-based lost detection.
+	// When true, disables velocity-based and covariance-threshold lost detection.
 	bool use_raw_covariance_;
 
 	// Visualization buffers

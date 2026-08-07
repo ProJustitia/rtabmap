@@ -701,6 +701,7 @@ class RTABMAP_CORE_EXPORT Parameters
     RTABMAP_PARAM(OdomCuVSLAM, ImuAccelNoiseDensity,     double, 0.00147,     "IMU accelerometer noise density [m/s^2/sqrt(Hz)]. Default: Bosch BMI055 (RealSense D455).");
     RTABMAP_PARAM(OdomCuVSLAM, ImuAccelRandomWalk,       double, 0.00004,     "IMU accelerometer bias random walk [m/s^3/sqrt(Hz)]. Default: Bosch BMI055 (RealSense D455).");
     RTABMAP_PARAM(OdomCuVSLAM, ImuFrequency,             double, 400.0,       "IMU measurement frequency [Hz]. RealSense D455 gyroscope runs at 400 Hz.");
+    RTABMAP_PARAM(OdomCuVSLAM, UseRawCovariance,         bool,   false,       "Forward cuVSLAM covariance to RTAB-Map without scaling or threshold-based lost detection. When false (default), covariance is scaled by 10x for angular terms and high-covariance frames trigger lost-state checks.");
 
     // Odometry LIO-SAM
     RTABMAP_PARAM_STR(OdomLIOSAM, ConfigPath,  "", "Path to LIO-SAM params.yaml config file. When set, sensor/IMU/feature parameters are loaded from the file and the individual parameters below are ignored.");
