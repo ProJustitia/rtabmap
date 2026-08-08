@@ -336,6 +336,11 @@ public:
 	 * @return true if modified, false otherwise
 	 */
 	bool isModified() const;
+	// Re-index all the words from scratch. The index then contains the words in
+	// the same order than the one built by update() on a dictionary freshly
+	// loaded from a database, which is required to serialize it (the serialized
+	// index is matched against the words in that order when deserialized).
+	void rebuildIndex();
 
 	/**
 	 * @brief Serialize the search index to a byte vector
