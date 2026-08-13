@@ -3711,7 +3711,7 @@ Transform Memory::computeTransform(
 
 				UDEBUG("sba...start");
 				// set root negative to fix all other poses
-				std::set<int> sbaOutliers;
+				BAOutliers sbaOutliers;
 				UTimer bundleTimer;
 				OptimizerG2O sba(parameters_);
 				sba.setIterations(5);
@@ -3719,24 +3719,34 @@ Transform Memory::computeTransform(
 				bundlePoses = sba.optimizeBA(-toS.id(), bundlePoses, bundleLinks, bundleModels, points3DMap, wordReferences, &sbaOutliers);
 				UDEBUG("sba...end");
 
-				UDEBUG("bundleTime=%fs (poses=%d wordRef=%d outliers=%d)", bundleTime.ticks(), (int)bundlePoses.size(), totalWordReferences, (int)sbaOutliers.size());
+				int sbaOutliersCount = 0;
+				for(unsigned int i=0; i<info->inliersIDs.size(); ++i)
+				{
+					BAOutliers::const_iterator iter = sbaOutliers.find(info->inliersIDs[i]);
+					if(iter != sbaOutliers.end() && iter->second.find(toS.id()) != iter->second.end())
+					{
+						++sbaOutliersCount;
+					}
+				}
+				UDEBUG("bundleTime=%fs (poses=%d wordRef=%d outliers=%d)", bundleTime.ticks(), (int)bundlePoses.size(), totalWordReferences, sbaOutliersCount);
 
 				UDEBUG("Local Bundle Adjustment Before: %s", transform.prettyPrint().c_str());
 				if(!bundlePoses.rbegin()->second.isNull())
 				{
-					if(sbaOutliers.size())
+					if(sbaOutliersCount)
 					{
 						std::vector<int> newInliers(info->inliersIDs.size());
 						int oi=0;
 						for(unsigned int i=0; i<info->inliersIDs.size(); ++i)
 						{
-							if(sbaOutliers.find(info->inliersIDs[i]) == sbaOutliers.end())
+							BAOutliers::const_iterator iter = sbaOutliers.find(info->inliersIDs[i]);
+							if(iter == sbaOutliers.end() || iter->second.find(toS.id()) == iter->second.end())
 							{
 								newInliers[oi++] = info->inliersIDs[i];
 							}
 						}
 						newInliers.resize(oi);
-						UDEBUG("BA outliers ratio %f", float(sbaOutliers.size())/float(info->inliersIDs.size()));
+						UDEBUG("BA outliers ratio %f", float(sbaOutliersCount)/float(info->inliersIDs.size()));
 						info->inliers = (int)newInliers.size();
 						info->inliersIDs = newInliers;
 					}
@@ -3850,7 +3860,12 @@ Transform Memory::computeIcpTransformMulti(
 			guessNorm > fromScan.rangeMax() + toScan.rangeMax())
 		{
 			// stop right known,it is impossible that scans overlay.
-			UINFO("Too far scans between %d and %d to compute transformation: guessNorm=%f, scan range from=%f to=%f", fromId, toId, guessNorm, fromScan.rangeMax(), toScan.rangeMax());
+			const std::string rejected = uFormat("Too far scans between %d and %d to compute transformation: guessNorm=%f, scan range from=%f to=%f", fromId, toId, guessNorm, fromScan.rangeMax(), toScan.rangeMax());
+			UINFO("%s", rejected.c_str());
+			if(info)
+			{
+				info->rejectedMsg = rejected;
+			}
 			return t;
 		}
 
@@ -3988,6 +4003,12 @@ Transform Memory::computeIcpTransformMulti(
 		{
 			t = t.inverse();
 		}
+	}
+	else if(info)
+	{
+		info->rejectedMsg = uFormat("Node %d (scan %s) or %d (scan %s) has no laser scan, cannot compute ICP transform.",
+				fromId, fromScan.isEmpty()?"empty":"ok",
+				toId, toScan.isEmpty()?"empty":"ok");
 	}
 
 	return t;
